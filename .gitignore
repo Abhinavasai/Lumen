@@ -1,0 +1,38 @@
+# Secrets & API keys
+.env
+
+# Personal profile & resume data (contains PII)
+profile.txt
+Abhinava_Sai_Tirunagari_CV.yaml
+docs/Abhinava_Sai_Profile.docx
+docs/Abhinava_Tirunagari_CV.pdf
+docs/Projects.docx
+docs/Prompt.docx
+
+# Config (contains Azure endpoint URL — use config.example.yaml as template)
+config.yaml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+
+# Pipeline output (generated on every run)
+output/
+db/
+jobs.json
+
+# Generated resumes and rendercv artifacts
+resumes/
+rendercv_output/
+
+# Workspace scratch files
+chat.json
+chatsessiion.md
+Untitled
+
+# Tools
+# Added by code-review-graph
+.code-review-graph/

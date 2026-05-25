@@ -1,0 +1,91 @@
+ai_ranking:
+  top_n: 40
+
+azure_openai:
+  api_version: 2025-03-01-preview
+  deployment: YOUR_DEPLOYMENT_NAME        # e.g. gpt-4o
+  endpoint: https://YOUR_RESOURCE.openai.azure.com
+
+filters:
+  location: United States
+  max_results: 180
+  posted_within_hours: 24
+
+keywords:
+  - "software engineer new grad"
+  - "AI engineer entry level"
+  - "backend engineer new grad"
+  - "ml engineer entry level"
+  - "full stack engineer new grad"
+  - "data engineer entry level"
+
+greenhouse_companies:
+  - anthropic
+  - scale-ai
+  - cohere
+  - anyscale
+  - modal-labs
+  - wandb
+  - hugging-face
+  - databricks
+  - confluent
+  - notion
+  - linear
+  - vercel
+  - figma
+  - discord
+  - stripe
+  - brex
+  - rippling
+  - ramp
+  - together-ai
+  - perplexity-ai
+  - openai
+  - netflix
+  - airbnb
+  - lyft
+  - uber
+  - shopify
+  - atlassian
+  - twilio
+  - datadog
+  - snowflake
+  - hashicorp
+  - elastic
+  - mongodb
+  - cloudflare
+  - pagerduty
+  - okta
+  - palantir
+  - reddit
+  - pinterest
+  - dropbox
+  - zoom
+  - hubspot
+  - zendesk
+  - intercom
+  - amplitude
+  - mixpanel
+  - segment
+  - airtable
+  - retool
+  - loom
+  - miro
+  - canva
+  - webflow
+  - netlify
+  - digitalocean
+  - cockroachdb
+  - grafana-labs
+  - clickhouse
+  - neon
+  - supabase
+  - github
+  - gitlab
+  - nvidia
+  - qualcomm
+  - spacex
+  - tesla
+  - rivian
+  - waymo
+  - cruise
