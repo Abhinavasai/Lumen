@@ -101,6 +101,20 @@ def validate_yaml_text(yaml_text: str) -> tuple[bool, str]:
         return False, str(e)
 
 
+def sanitize_rendercv_yaml(yaml_text: str) -> str:
+    """
+    Remove fields that RenderCV's schema doesn't support at the cv level.
+    GPT sometimes adds 'summary:' under cv: — that causes a validation error.
+    """
+    try:
+        data = yaml.safe_load(yaml_text)
+        if isinstance(data, dict) and "cv" in data:
+            data["cv"].pop("summary", None)
+        return yaml.dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False)
+    except Exception:
+        return yaml_text  # if parsing fails, return as-is (validator will catch it)
+
+
 def job_id(job: dict) -> str:
     company = job.get("company", job.get("companyName", "Company")).strip()
     title   = job.get("title", job.get("position", "Role")).strip()
@@ -372,6 +386,7 @@ Output ONLY raw valid YAML — nothing else. Double-check every line before resp
             print(" [OK]")
             is_valid_yaml, yaml_err = validate_yaml_text(tailored)
             if is_valid_yaml:
+                tailored = sanitize_rendercv_yaml(tailored)
                 break
             debug_yaml = os.path.join(DEBUG_DIR, f"{jid}_attempt{attempt}_yamlretry{yaml_attempt}_invalid.yaml")
             save_file(debug_yaml, tailored)

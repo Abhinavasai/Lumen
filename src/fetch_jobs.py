@@ -56,9 +56,9 @@ def normalize_job(source, job_id, company, title, location, url, description, po
 
 def fetch_linkedin_apify(keywords: list, max_results: int, location: str = "United States") -> list:
     """
-    Uses the Apify LinkedIn Jobs Scraper actor to fetch recent job listings.
-    Actor: hDODmSIAkBMcpbzYX
-    Returns list of normalized job dicts, or empty list on any failure.
+    Uses the Apify curious_coder/linkedin-jobs-scraper actor.
+    Input: LinkedIn search URLs (one per keyword) + count.
+    Actor ID: hKByXkMQaC5Qt9UMN
     """
     if not APIFY_TOKEN:
         print("  [Apify] APIFY_TOKEN not set, skipping.")
@@ -78,15 +78,24 @@ def fetch_linkedin_apify(keywords: list, max_results: int, location: str = "Unit
         if len(jobs) >= max_results:
             break
         try:
+            # Build a LinkedIn search URL: entry-level (f_E=2), last 24h (f_TPR=r86400)
+            search_url = (
+                "https://www.linkedin.com/jobs/search/?"
+                f"keywords={requests.utils.quote(keyword)}"
+                f"&location={requests.utils.quote(location)}"
+                "&f_TPR=r86400"
+                "&f_E=2"
+            )
             run_input = {
-                "searchTerms": [keyword],
-                "location": location,
-                "datePosted": "past24Hours",
-                "rows": min(max_results - len(jobs), 25),
+                "urls": [search_url],
+                "count": min(max_results - len(jobs), 25),
             }
-            run = client.actor("hDODmSIAkBMcpbzYX").call(run_input=run_input)
+            run = client.actor("hKByXkMQaC5Qt9UMN").call(run_input=run_input)
             for item in client.dataset(run["defaultDatasetId"]).iterate_items():
-                url = item.get("jobUrl") or item.get("url") or ""
+                url = (
+                    item.get("link") or item.get("jobUrl")
+                    or item.get("url") or item.get("applyUrl") or ""
+                )
                 if not url or url in seen_urls:
                     continue
                 seen_urls.add(url)
@@ -101,13 +110,13 @@ def fetch_linkedin_apify(keywords: list, max_results: int, location: str = "Unit
                 )
                 jobs.append(normalize_job(
                     source="linkedin",
-                    job_id=job_id or item.get("id", ""),
+                    job_id=job_id or str(item.get("id", "")),
                     company=item.get("companyName") or item.get("company") or "",
-                    title=item.get("positionName") or item.get("title") or "",
+                    title=item.get("title") or item.get("positionName") or "",
                     location=item.get("location") or "",
                     url=url,
                     description=description,
-                    posted_at=(item.get("postedAt") or item.get("datePosted") or "")[:10],
+                    posted_at=(item.get("postedDate") or item.get("date") or item.get("postedAt") or "")[:10],
                 ))
                 if len(jobs) >= max_results:
                     break
@@ -329,8 +338,111 @@ def fetch_greenhouse(keywords, company_slugs):
 
 
 # ---------------------------------------------------------------------------
-# Orchestrator
+# Source 4: Lever board API (public, no key needed)
 # ---------------------------------------------------------------------------
+
+def fetch_lever(keywords: list, company_slugs: list) -> list:
+    """
+    Lever public jobs API — no auth required.
+    Endpoint: https://api.lever.co/v0/postings/{slug}?mode=json&limit=50
+    Companies using Lever: Figma, Notion, Vercel, Airbnb, Lyft, Linear, etc.
+    """
+    jobs = []
+    kw_lower = [k.lower() for k in keywords]
+
+    for slug in company_slugs:
+        try:
+            url = f"https://api.lever.co/v0/postings/{slug}?mode=json&limit=50"
+            resp = requests.get(url, headers=HEADERS, timeout=15)
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            if not isinstance(data, list):
+                continue
+            for job in data:
+                title = job.get("text", "")
+                if not any(kw in title.lower() for kw in kw_lower):
+                    continue
+                categories = job.get("categories", {})
+                commitment = categories.get("commitment", "")
+                # Skip internships at Lever level
+                if "intern" in commitment.lower():
+                    continue
+                job_location = categories.get("location", "") or job.get("workplaceType", "")
+                description_html = ""
+                lists = job.get("lists", [])
+                for section in lists:
+                    description_html += section.get("text", "") + "\n" + section.get("content", "") + "\n"
+                description_html += job.get("descriptionPlain", "") or ""
+                jobs.append(normalize_job(
+                    source="lever",
+                    job_id=job.get("id", ""),
+                    company=job.get("company", slug),
+                    title=title,
+                    location=job_location,
+                    url=job.get("hostedUrl", ""),
+                    description=description_html.strip(),
+                    posted_at="",
+                ))
+        except Exception as e:
+            print(f"  [Lever] Error for '{slug}': {e}")
+    return jobs
+
+
+# ---------------------------------------------------------------------------
+# Source 5: Ashby board API (public, no key needed)
+# ---------------------------------------------------------------------------
+
+def fetch_ashby(keywords: list, company_slugs: list) -> list:
+    """
+    Ashby public jobs API — no auth required.
+    Endpoint: POST https://api.ashbyhq.com/posting-api/job-board/{slug}
+    Companies using Ashby: Anthropic, Linear, Rippling, Ramp, Loom, Retool, etc.
+    """
+    jobs = []
+    kw_lower = [k.lower() for k in keywords]
+
+    for slug in company_slugs:
+        try:
+            url = f"https://api.ashbyhq.com/posting-api/job-board/{slug}"
+            resp = requests.post(
+                url,
+                json={"includeCompensation": False},
+                headers={**HEADERS, "Content-Type": "application/json"},
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            postings = data.get("jobPostings", [])
+            for job in postings:
+                title = job.get("title", "")
+                if not any(kw in title.lower() for kw in kw_lower):
+                    continue
+                employment_type = job.get("employmentType", "")
+                if "intern" in employment_type.lower():
+                    continue
+                location_name = ""
+                locations = job.get("jobPostingLocations", [])
+                if locations:
+                    location_name = locations[0].get("locationName", "")
+                description = job.get("descriptionPlain", "") or job.get("descriptionHtml", "") or ""
+                jobs.append(normalize_job(
+                    source="ashby",
+                    job_id=job.get("id", ""),
+                    company=slug,
+                    title=title,
+                    location=location_name,
+                    url=job.get("jobUrl", ""),
+                    description=description,
+                    posted_at=(job.get("publishedAt", "") or "")[:10],
+                ))
+        except Exception as e:
+            print(f"  [Ashby] Error for '{slug}': {e}")
+    return jobs
+
+
+
 
 def fetch_all():
     config = load_config()
@@ -338,17 +450,29 @@ def fetch_all():
     location = config["filters"]["location"]
     max_results = config["filters"]["max_results"]
     greenhouse_companies = config.get("greenhouse_companies", [])
+    lever_companies = config.get("lever_companies", [])
+    ashby_companies = config.get("ashby_companies", [])
 
     all_jobs = []
 
-    # --- LinkedIn: Apify primary, direct guest API fallback ---
+    # --- LinkedIn: Apify + direct guest API both run; results merged by URL ---
     print("[fetch] Fetching LinkedIn jobs (Apify)...")
-    linkedin_jobs = fetch_linkedin_apify(keywords, max_results, location=location)
-    if not linkedin_jobs:
-        print("  [Apify] No results or failed -- falling back to direct guest API...")
-        linkedin_jobs = fetch_linkedin_direct(keywords, max_results, location=location)
-        print(f"  [LinkedIn fallback] Total: {len(linkedin_jobs)} jobs")
-    all_jobs.extend(linkedin_jobs)
+    apify_jobs = fetch_linkedin_apify(keywords, max_results, location=location)
+    print(f"  [Apify] Returned {len(apify_jobs)} jobs")
+
+    print("[fetch] Fetching LinkedIn jobs (direct guest API)...")
+    direct_jobs = fetch_linkedin_direct(keywords, max_results, location=location)
+    print(f"  [LinkedIn direct] Returned {len(direct_jobs)} jobs")
+
+    # Merge: Apify first, then fill in any new URLs from direct
+    seen_linkedin_urls: set = {j["url"] for j in apify_jobs if j["url"]}
+    merged_linkedin = list(apify_jobs)
+    for j in direct_jobs:
+        if j["url"] and j["url"] not in seen_linkedin_urls:
+            seen_linkedin_urls.add(j["url"])
+            merged_linkedin.append(j)
+    print(f"  [LinkedIn merged] Total unique: {len(merged_linkedin)} jobs")
+    all_jobs.extend(merged_linkedin)
 
     # --- Adzuna ---
     print("[fetch] Fetching from Adzuna...")
@@ -362,6 +486,20 @@ def fetch_all():
         gh_jobs = fetch_greenhouse(keywords, greenhouse_companies)
         print(f"  [Greenhouse] Returned {len(gh_jobs)} jobs")
         all_jobs.extend(gh_jobs)
+
+    # --- Lever ---
+    if lever_companies:
+        print(f"[fetch] Fetching from Lever ({len(lever_companies)} companies)...")
+        lever_jobs = fetch_lever(keywords, lever_companies)
+        print(f"  [Lever] Returned {len(lever_jobs)} jobs")
+        all_jobs.extend(lever_jobs)
+
+    # --- Ashby ---
+    if ashby_companies:
+        print(f"[fetch] Fetching from Ashby ({len(ashby_companies)} companies)...")
+        ashby_jobs = fetch_ashby(keywords, ashby_companies)
+        print(f"  [Ashby] Returned {len(ashby_jobs)} jobs")
+        all_jobs.extend(ashby_jobs)
 
     with open(RAW_OUTPUT, "w", encoding="utf-8") as f:
         json.dump(all_jobs, f, indent=2, ensure_ascii=False)

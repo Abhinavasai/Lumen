@@ -18,7 +18,7 @@ Automated daily job scraper that fetches entry-level / new-grad CS jobs from Lin
 
 ## Features
 
-- **Multi-source fetching** — LinkedIn via Apify (direct guest API fallback), Adzuna REST API, Greenhouse board API
+- **Multi-source fetching** — LinkedIn via Apify actor + direct guest API (both run simultaneously, merged by URL), Adzuna REST API, Greenhouse board API
 - **Smart filtering** — title keywords, seniority/intern exclusion, H1B no-sponsorship signals, US/remote location, recency window
 - **H1B awareness** — tags known H1B sponsors; filters out explicit no-sponsorship postings; AI ranker scores confirmed sponsors higher
 - **Deduplication** — URL-exact + normalized `company|title|location` key
@@ -261,7 +261,7 @@ Unregister-ScheduledTask -TaskName "JobHunterDailyCron" -Confirm:$false
 
 ```
 Sources
-  └─ LinkedIn      (Apify actor hDODmSIAkBMcpbzYX → direct guest API fallback)  ─┐
+  └─ LinkedIn      (Apify actor + direct guest API — both run, results merged)  ─┐
   └─ Adzuna        (REST API)                                                      ├─→ raw_jobs.json
   └─ Greenhouse    (board API, company slugs from config.yaml)                    ─┘
          ↓
