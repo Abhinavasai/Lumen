@@ -4,6 +4,7 @@ Orchestrates the full pipeline: fetch -> filter -> dedupe -> save -> rank.
 Run manually:  python run_pipeline.py
 Scheduled:     Windows Task Scheduler calls this script daily.
 """
+import argparse
 import os
 import sys
 import traceback
@@ -25,11 +26,13 @@ _STALE_FILES = [
 ]
 
 STEPS = [
-    ("Fetching jobs",          "fetch_jobs",    "fetch_all"),
-    ("Filtering jobs",         "filter_jobs",   "filter_jobs"),
-    ("Deduplicating jobs",     "dedupe_jobs",   "dedupe_jobs"),
-    ("Saving to SQLite",       "save_to_sqlite","save_jobs"),
-    ("AI ranking (top 25)",    "ai_ranker",     "rank_jobs"),
+    ("Fetching jobs",          "fetch_jobs",       "fetch_all"),
+    ("Filtering jobs",         "filter_jobs",      "filter_jobs"),
+    ("Deduplicating jobs",     "dedupe_jobs",      "dedupe_jobs"),
+    ("Saving to SQLite",       "save_to_sqlite",   "save_jobs"),
+    ("AI ranking (top 25)",    "ai_ranker",        "rank_jobs"),
+    ("Building resumes",       "build_all_resumes","build_all"),
+    ("Auto-applying",          "auto_apply",       "auto_apply"),
 ]
 
 
@@ -46,15 +49,19 @@ def clear_outputs():
     print()
 
 
-def run_pipeline():
+def run_pipeline(fetch_only=False):
     start = datetime.now()
     print(f"\n{'=' * 60}")
     print(f"  Job Hunter Pipeline - {start.strftime('%Y-%m-%d %H:%M:%S')}")
+    if fetch_only:
+        print(f"  Mode: fetch + rank only (no resume build / auto-apply)")
     print(f"{'=' * 60}\n")
 
     clear_outputs()
 
-    for label, module_name, func_name in STEPS:
+    steps = STEPS[:5] if fetch_only else STEPS
+
+    for label, module_name, func_name in steps:
         print(f"--- {label} ---")
         try:
             import importlib
@@ -75,4 +82,8 @@ def run_pipeline():
 
 
 if __name__ == "__main__":
-    run_pipeline()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--fetch-only", action="store_true",
+                        help="Run only fetch/filter/dedupe/save/rank (skip resume build & auto-apply)")
+    args = parser.parse_args()
+    run_pipeline(fetch_only=args.fetch_only)

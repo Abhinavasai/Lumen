@@ -1,0 +1,9 @@
+{
+  "/_not-found/page": "/_not-found",
+  "/auto-apply/page": "/auto-apply",
+  "/applied/page": "/applied",
+  "/jobs/page": "/jobs",
+  "/generate/page": "/generate",
+  "/settings/page": "/settings",
+  "/page": "/"
+}

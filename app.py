@@ -336,14 +336,12 @@ def _ensure_applied_table(conn):
 def dismiss_job(job: dict):
     if not os.path.exists(DB_PATH):
         return
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     conn = sqlite3.connect(DB_PATH)
-    _ensure_applied_table(conn)
-    conn.execute(
-        "INSERT OR IGNORE INTO applied_jobs (source_job_id, title, company, url, applied_at) VALUES (?,?,?,?,?)",
-        (job.get("source_job_id",""), job.get("title",""), job.get("company",""), job.get("url",""), now),
-    )
-    conn.execute("DELETE FROM jobs WHERE url = ?", (job.get("url",""),))
+    # Ensure dismissed column exists (migrate older databases)
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    if "dismissed" not in existing:
+        conn.execute("ALTER TABLE jobs ADD COLUMN dismissed INTEGER DEFAULT 0")
+    conn.execute("UPDATE jobs SET dismissed = 1 WHERE url = ?", (job.get("url", ""),))
     conn.commit()
     conn.close()
 
@@ -375,15 +373,45 @@ def get_applied_count() -> int:
         return 0
 
 
+def get_auto_apply_summary() -> dict:
+    """Return counts by status: {submitted: N, failed: N, error: N, dry_run: N, total: N}."""
+    result = {"submitted": 0, "failed": 0, "error": 0, "dry_run": 0, "total": 0}
+    if not os.path.exists(DB_PATH):
+        return result
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(applied_jobs)").fetchall()}
+        if "status" not in existing:
+            conn.close()
+            return result
+        rows = conn.execute("SELECT status, COUNT(*) FROM applied_jobs GROUP BY status").fetchall()
+        conn.close()
+        for status, cnt in rows:
+            if status in result:
+                result[status] = cnt
+            result["total"] += cnt
+        return result
+    except Exception:
+        return result
+
+
 def get_applied_jobs() -> list[dict]:
     if not os.path.exists(DB_PATH):
         return []
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT source_job_id, title, company, url, applied_at FROM applied_jobs ORDER BY applied_at DESC"
-        ).fetchall()
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(applied_jobs)").fetchall()}
+        has_status = "status" in existing and "platform" in existing and "error" in existing
+        if has_status:
+            rows = conn.execute(
+                "SELECT source_job_id, title, company, url, applied_at, platform, status, error "
+                "FROM applied_jobs ORDER BY applied_at DESC"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT source_job_id, title, company, url, applied_at FROM applied_jobs ORDER BY applied_at DESC"
+            ).fetchall()
         conn.close()
         return [dict(r) for r in rows]
     except Exception:
@@ -396,19 +424,40 @@ def get_jobs(top_n: int | None = None) -> list[dict]:
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
+        # Check if new columns exist for proper filtering
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        has_new_cols = "is_top_pick" in existing and "dismissed" in existing
+
         if top_n:
-            rows = conn.execute("""
-                SELECT * FROM jobs
-                WHERE run_date = (SELECT MAX(run_date) FROM jobs)
-                  AND ai_score IS NOT NULL
-                ORDER BY ai_score DESC LIMIT ?
-            """, (top_n,)).fetchall()
+            if has_new_cols:
+                rows = conn.execute("""
+                    SELECT * FROM jobs
+                    WHERE run_date = (SELECT MAX(run_date) FROM jobs)
+                      AND is_top_pick = 1
+                      AND dismissed = 0
+                    ORDER BY ai_score DESC
+                """).fetchall()
+            else:
+                rows = conn.execute("""
+                    SELECT * FROM jobs
+                    WHERE run_date = (SELECT MAX(run_date) FROM jobs)
+                      AND ai_score IS NOT NULL
+                    ORDER BY ai_score DESC LIMIT ?
+                """, (top_n,)).fetchall()
         else:
-            rows = conn.execute("""
-                SELECT * FROM jobs
-                WHERE run_date = (SELECT MAX(run_date) FROM jobs)
-                ORDER BY COALESCE(ai_score, 0) DESC
-            """).fetchall()
+            if has_new_cols:
+                rows = conn.execute("""
+                    SELECT * FROM jobs
+                    WHERE run_date = (SELECT MAX(run_date) FROM jobs)
+                      AND dismissed = 0
+                    ORDER BY COALESCE(ai_score, 0) DESC
+                """).fetchall()
+            else:
+                rows = conn.execute("""
+                    SELECT * FROM jobs
+                    WHERE run_date = (SELECT MAX(run_date) FROM jobs)
+                    ORDER BY COALESCE(ai_score, 0) DESC
+                """).fetchall()
         conn.close()
         return [dict(r) for r in rows]
     except Exception:
@@ -464,7 +513,28 @@ def build_resume_background(job_index: int):
 def run_pipeline_background():
     clear_jobs_db()
     subprocess.Popen(
-        [sys.executable, os.path.join(BASE_DIR, "src", "run_pipeline.py")],
+        [sys.executable, os.path.join(BASE_DIR, "src", "run_pipeline.py"), "--fetch-only"],
+        cwd=BASE_DIR,
+        creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0,
+    )
+
+
+def build_resumes_background():
+    subprocess.Popen(
+        [sys.executable, os.path.join(BASE_DIR, "src", "build_all_resumes.py"), "--reset"],
+        cwd=BASE_DIR,
+        creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0,
+    )
+
+
+def auto_apply_background(dry_run: bool = False, source: str | None = None):
+    cmd = [sys.executable, os.path.join(BASE_DIR, "src", "auto_apply.py")]
+    if dry_run:
+        cmd.append("--dry-run")
+    if source:
+        cmd.extend(["--source", source])
+    subprocess.Popen(
+        cmd,
         cwd=BASE_DIR,
         creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0,
     )
@@ -558,7 +628,7 @@ with st.sidebar:
     )
     max_results = st.slider(
         "Max jobs to fetch",
-        min_value=10, max_value=200,
+        min_value=10, max_value=1000,
         value=config["filters"]["max_results"],
         step=10,
     )
@@ -578,6 +648,13 @@ with st.sidebar:
         value=config["ai_ranking"]["top_n"],
         step=5,
     )
+    min_score = st.slider(
+        "Minimum AI score",
+        min_value=1, max_value=8,
+        value=config["ai_ranking"].get("min_score", 5),
+        step=1,
+        help="Jobs scoring below this are excluded from Top Picks, even if the pool is small.",
+    )
 
     if st.button("Save settings", use_container_width=True):
         config["keywords"] = [k.strip() for k in keywords_str.strip().splitlines() if k.strip()]
@@ -585,6 +662,7 @@ with st.sidebar:
         config["filters"]["location"] = location
         config["filters"]["posted_within_hours"] = posted_within_hours
         config["ai_ranking"]["top_n"] = top_n
+        config["ai_ranking"]["min_score"] = min_score
         save_config(config)
         st.success("Settings saved.")
 
@@ -603,6 +681,65 @@ with st.sidebar:
 
     if st.button("Refresh results", use_container_width=True):
         st.rerun()
+
+    if st.button("Build all resumes", use_container_width=True):
+        build_resumes_background()
+        st.info("Resume builder started. Check the terminal window for progress.")
+
+    st.divider()
+    st.markdown('<div style="font-size:0.82rem;font-weight:600;color:#4a3f35;margin-bottom:0.5rem;">Auto Apply</div>', unsafe_allow_html=True)
+    apply_source = st.selectbox(
+        "Platform",
+        options=["All", "greenhouse", "ashby", "lever", "workday", "smartrecruiters", "workable", "bamboohr"],
+        index=0,
+        label_visibility="collapsed",
+    )
+    col_apply, col_dry = st.columns(2)
+    with col_apply:
+        if st.button("Apply Now", type="primary", use_container_width=True):
+            src = None if apply_source == "All" else apply_source
+            auto_apply_background(dry_run=False, source=src)
+            st.info("Auto-apply started. Check the terminal window for progress.")
+    with col_dry:
+        if st.button("Dry Run", use_container_width=True):
+            src = None if apply_source == "All" else apply_source
+            auto_apply_background(dry_run=True, source=src)
+            st.info("Dry run started. Check the terminal window to preview.")
+
+    progress_file = os.path.join(BASE_DIR, "output", "auto_apply_progress.json")
+    if os.path.exists(progress_file):
+        try:
+            with open(progress_file, encoding="utf-8") as _pf:
+                aa_progress = json.load(_pf)
+        except Exception:
+            aa_progress = None
+
+        if aa_progress and aa_progress.get("total", 0) > 0:
+            is_running = aa_progress.get("running", False)
+            current = aa_progress.get("current", 0)
+            total = aa_progress.get("total", 1)
+            cur_job = aa_progress.get("current_job")
+            n_applied = aa_progress.get("applied", 0)
+            n_failed = aa_progress.get("failed", 0)
+            n_skipped = aa_progress.get("skipped", 0)
+
+            if is_running:
+                st.progress(current / total, text=f"Applying {current}/{total}")
+                if cur_job:
+                    st.caption(f"Current: **{cur_job['title']}** @ {cur_job['company']} [{cur_job['source']}]")
+                st.caption(f"Sent: {n_applied} · Failed: {n_failed} · Skipped: {n_skipped}")
+            else:
+                failed_tag = f" · <span style='color:#842029;'>{n_failed} failed</span>" if n_failed > 0 else ""
+                st.markdown(
+                    f'<div style="background:#fff9f0;border:1px solid #ddd5c6;border-radius:8px;'
+                    f'padding:0.6rem 0.8rem;margin-top:0.5rem;font-size:0.8rem;">'
+                    f'<span style="color:#4a3f35;font-weight:600;">{total}</span> processed '
+                    f'&nbsp;·&nbsp; '
+                    f'<span style="color:#276d38;">{n_applied} sent</span>'
+                    f'{failed_tag}'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
 
 
 # ─── Main panel ──────────────────────────────────────────────────────────────
@@ -703,27 +840,93 @@ with tab_applied:
     applied = get_applied_jobs()
 
     if not applied:
-        st.info("No applied jobs yet. Click Apply on any job in the Top Picks tab.")
+        st.info("No applied jobs yet. Click Apply on any job in the Top Picks tab, or run Auto Apply.")
     else:
-        st.caption(f"**{len(applied)}** job(s) marked as applied — excluded from future runs")
-        st.divider()
+        has_status_col = "status" in applied[0]
 
-        h1, h2, h3, h4 = st.columns([3, 2, 2, 1])
-        h1.markdown('<div class="table-header">Title</div>', unsafe_allow_html=True)
-        h2.markdown('<div class="table-header">Company</div>', unsafe_allow_html=True)
-        h3.markdown('<div class="table-header">Applied At</div>', unsafe_allow_html=True)
-        h4.markdown('<div class="table-header">Link</div>', unsafe_allow_html=True)
+        if has_status_col:
+            submitted = [j for j in applied if j.get("status") == "submitted"]
+            failed = [j for j in applied if j.get("status") in ("failed", "error")]
+            dry_runs = [j for j in applied if j.get("status") == "dry_run"]
+            other = [j for j in applied if j.get("status") not in ("submitted", "failed", "error", "dry_run")]
 
-        st.divider()
-        for job in applied:
-            c1, c2, c3, c4 = st.columns([3, 2, 2, 1])
-            c1.write(job["title"])
-            c2.write(job["company"])
-            c3.write((job.get("applied_at") or "")[:16])
-            if job.get("url"):
-                c4.markdown(f"[Open →]({job['url']})")
+            cs1, cs2, cs3, cs4 = st.columns(4)
+            cs1.metric("Total", len(applied))
+            cs2.metric("Submitted", len(submitted))
+            cs3.metric("Failed", len(failed))
+            cs4.metric("Dry Runs", len(dry_runs))
+
+            status_filter = st.selectbox(
+                "Filter by status",
+                options=["All", "Failed (apply manually)", "Submitted", "Dry Run"],
+                index=0,
+                label_visibility="collapsed",
+            )
+            if status_filter == "Failed (apply manually)":
+                display_applied = failed
+            elif status_filter == "Submitted":
+                display_applied = submitted
+            elif status_filter == "Dry Run":
+                display_applied = dry_runs
             else:
-                c4.write("—")
+                display_applied = applied
+
+            if failed and status_filter in ("All", "Failed (apply manually)"):
+                st.markdown(
+                    '<div style="background:#fdf0f0;border:1px solid #e8c4c4;border-radius:10px;'
+                    'padding:0.8rem 1.1rem;margin-bottom:0.8rem;">'
+                    f'<span style="font-weight:600;color:#842029;">'
+                    f'{len(failed)} job(s) failed auto-apply</span>'
+                    ' — click the link to apply manually'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+        else:
+            display_applied = applied
+
+        st.divider()
+
+        for job in display_applied:
+            status = job.get("status", "submitted") if has_status_col else "submitted"
+            platform = job.get("platform", "") if has_status_col else ""
+            error_msg = job.get("error", "") if has_status_col else ""
+
+            if status in ("failed", "error"):
+                badge_cls, badge_text = "score-low", "FAILED"
+            elif status == "dry_run":
+                badge_cls, badge_text = "score-mid", "DRY RUN"
+            else:
+                badge_cls, badge_text = "score-high", "SUBMITTED"
+
+            platform_tag = f'<span class="source-tag">{platform}</span> ' if platform else ""
+            error_html = f'<div class="reason-box" style="border-left-color:#e8c4c4;">{error_msg}</div>' if error_msg else ""
+
+            st.markdown(
+                f'<div class="job-card">'
+                f'  <div class="job-title">'
+                f'    <span class="score-pill {badge_cls}">{badge_text}</span>'
+                f'    {job.get("title", "")}'
+                f'  </div>'
+                f'  <div class="job-company">{job.get("company", "")} &nbsp;·&nbsp; {platform_tag}'
+                f'    {(job.get("applied_at") or "")[:16]}'
+                f'  </div>'
+                f'  {error_html}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+            if status in ("failed", "error") and job.get("url"):
+                col_link, col_resume, _ = st.columns([1.5, 1.5, 7])
+                with col_link:
+                    st.markdown(f"[Open job posting →]({job['url']})")
+                with col_resume:
+                    idx = find_job_index_in_filtered(job.get("url", ""))
+                    if idx is not None:
+                        if st.button("Build Resume", key=f"rebuild_{job.get('source_job_id', '')}"):
+                            build_resume_background(idx)
+                            st.toast(f"Building resume for {job.get('title')}")
+            elif job.get("url"):
+                st.markdown(f"[Open job posting →]({job['url']})")
 
 
 # ── Tab 4 : Generate Resume ──────────────────────────────────────────────────
@@ -852,7 +1055,7 @@ with tab_custom:
 # ── Tab 5 : Setup ────────────────────────────────────────────────────────────
 with tab_setup:
     PROFILE_PATH   = os.path.join(BASE_DIR, "profile.txt")
-    BASE_YAML_PATH = os.path.join(BASE_DIR, "Abhinava_Sai_Tirunagari_CV.yaml")
+    BASE_YAML_PATH = os.path.join(BASE_DIR, os.getenv("BASE_YAML_NAME", "base_resume.yaml"))
     ENV_PATH       = os.path.join(BASE_DIR, ".env")
 
     def read_env() -> dict:

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 import yaml
 from openai import AzureOpenAI
 from dotenv import load_dotenv
@@ -42,7 +43,8 @@ def get_client(config):
     return client, azure_cfg["deployment"]
 
 
-def score_job(client: AzureOpenAI, deployment: str, profile: str, job: dict) -> tuple[int, str]:
+def score_job(client: AzureOpenAI, deployment: str, profile: str, job: dict,
+              min_score: int = 5) -> tuple[int, str]:
     """Ask the model to score job fit 1-10 with a one-line reason."""
     jd_snippet = (
         f"Company: {job.get('company', 'Unknown')}\n"
@@ -50,40 +52,45 @@ def score_job(client: AzureOpenAI, deployment: str, profile: str, job: dict) -> 
         f"Location: {job.get('location', '')}\n"
         f"Source: {job.get('source', '')}\n"
         f"H1B Friendly: {'Yes' if job.get('h1b_friendly') else 'Unknown'}\n\n"
-        f"Description:\n{job.get('description', '')[:3000]}"
+        f"Description:\n{job.get('description', '')}"
     )
 
     prompt = (
         "You are a job-fit evaluator. Score how well this job matches the candidate profile.\n\n"
         f"CANDIDATE PROFILE:\n{profile}\n\n"
         f"JOB POSTING:\n{jd_snippet}\n\n"
-        "Respond with ONLY a JSON object â€” no markdown, no explanation outside the JSON:\n"
+        "Respond with ONLY a JSON object -- no markdown, no explanation outside the JSON:\n"
         '{"score": <1-10 integer>, "reason": "<one sentence, max 20 words>"}\n\n'
         "Use the scoring criteria at the bottom of the profile."
     )
 
-    try:
-        response = client.responses.create(
-            model=deployment,
-            input=prompt,
-        )
-        text = response.output_text.strip()
-        # Extract JSON even if model wraps it in markdown fences
-        match = re.search(r"\{.*?\}", text, re.DOTALL)
-        if match:
-            result = json.loads(match.group())
-            score = max(1, min(10, int(result.get("score", 5))))
-            reason = str(result.get("reason", "")).strip()
-            return score, reason
-    except Exception as e:
-        print(f"    [ai_ranker] Scoring error for '{job.get('title')}': {e}")
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        try:
+            response = client.responses.create(
+                model=deployment,
+                input=prompt,
+            )
+            text = response.output_text.strip()
+            match = re.search(r"\{.*?\}", text, re.DOTALL)
+            if match:
+                result = json.loads(match.group())
+                score = max(1, min(10, int(result.get("score", 5))))
+                reason = str(result.get("reason", "")).strip()
+                return score, reason
+        except Exception as e:
+            if attempt < max_retries:
+                time.sleep(2 ** attempt)
+                continue
+            print(f"    [ai_ranker] Scoring error for '{job.get('title')}' after {max_retries + 1} attempts: {e}")
 
-    return 0, "Could not score"
+    return min_score, "Scoring failed - default pass"
 
 
 def rank_jobs() -> list:
     config = load_config()
     top_n = config["ai_ranking"]["top_n"]
+    min_score = config["ai_ranking"].get("min_score", 5)
     profile = load_profile()
     client, deployment = get_client(config)
 
@@ -119,22 +126,43 @@ def rank_jobs() -> list:
 
     scored = []
     for i, job in enumerate(jobs, 1):
-        score, reason = score_job(client, deployment, profile, job)
+        score, reason = score_job(client, deployment, profile, job, min_score=min_score)
         job["ai_score"] = score
         job["ai_reason"] = reason
         scored.append(job)
-        print(f"  [{i:02d}/{len(jobs)}] {job['title']} @ {job['company']}  â†’  {score}/10  |  {reason}")
+        print(f"  [{i:02d}/{len(jobs)}] {job['title']} @ {job['company']}  â†'  {score}/10  |  {reason}")
 
     scored.sort(key=lambda x: x["ai_score"], reverse=True)
-    top = scored[:top_n]
+    qualified = [j for j in scored if j["ai_score"] >= min_score]
+    top = qualified[:top_n]
+
+    dropped = len(scored) - len(qualified)
+    if dropped:
+        print(f"[ai_ranker] Dropped {dropped} job(s) scoring below {min_score}/10.")
 
     # Persist scores back to SQLite
     conn = sqlite3.connect(DB_PATH)
+
+    # Ensure new columns exist (migrate older databases)
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    for col, default in [("is_top_pick", "0"), ("dismissed", "0")]:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} INTEGER DEFAULT {default}")
+
+    # Reset is_top_pick for this run before re-stamping
+    conn.execute("UPDATE jobs SET is_top_pick = 0 WHERE run_date = (SELECT MAX(run_date) FROM jobs)")
+
     for job in scored:
         conn.execute(
             "UPDATE jobs SET ai_score = ?, ai_reason = ? WHERE id = ?",
             (job["ai_score"], job["ai_reason"], job["id"]),
         )
+
+    # Mark top-N as top picks
+    top_ids = [job["id"] for job in top]
+    for job_id in top_ids:
+        conn.execute("UPDATE jobs SET is_top_pick = 1 WHERE id = ?", (job_id,))
+
     conn.commit()
     conn.close()
 

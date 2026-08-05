@@ -31,14 +31,23 @@ from openai import OpenAI, AzureOpenAI
 # ══════════════════════════════════════════════════════════════
 BASE_DIR         = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 JOBS_FILE        = os.path.join(BASE_DIR, "output", "top25_jobs.json")
-BASE_YAML        = os.path.join(BASE_DIR, "Abhinava_Sai_Tirunagari_CV.yaml")
+BASE_YAML        = os.path.join(BASE_DIR, os.getenv("BASE_YAML_NAME", "base_resume.yaml"))
 PROMPT_FILE      = os.path.join(BASE_DIR, "docs", "ATS_Resume_Tailoring_Prompt.txt")
+PROJECTS_FILE    = os.path.join(BASE_DIR, "docs", "All_Projects.md")
 OUTPUT_DIR       = os.path.join(BASE_DIR, "resumes")
 DONE_LOG         = os.path.join(BASE_DIR, "output", ".processed_jobs.txt")
 CONFIG_FILE      = os.path.join(BASE_DIR, "config.yaml")
 MAX_TRIM_RETRIES = 3       # max render attempts per job before giving up
 DELAY_BETWEEN    = 3       # seconds between jobs (avoid OpenAI rate limits)
 DEBUG_DIR        = os.path.join(BASE_DIR, "output", "debug_resume_errors")
+# ── Font-shrink levels: try smaller typography before asking GPT to trim content
+# Base design: 7pt body, 0.35em line spacing, 0.3em entry spacing, 0.3cm section above
+MAX_SHRINK_LEVELS = 3
+SHRINK_LEVELS = [
+    {"body_pt": 6.875, "line_spacing": 0.33, "entry_spacing": 0.28, "section_above": 0.28},
+    {"body_pt": 6.75,  "line_spacing": 0.30, "entry_spacing": 0.25, "section_above": 0.25},
+    {"body_pt": 6.625, "line_spacing": 0.28, "entry_spacing": 0.22, "section_above": 0.22},
+]
 # ══════════════════════════════════════════════════════════════
 
 load_dotenv(os.path.join(BASE_DIR, ".env"))
@@ -115,6 +124,32 @@ def sanitize_rendercv_yaml(yaml_text: str) -> str:
         return yaml_text  # if parsing fails, return as-is (validator will catch it)
 
 
+def apply_shrink_level(yaml_text: str, level: int) -> str:
+    """Reduce font size and spacing to fit content on fewer pages.
+    Level 1 = slight shrink (8.25pt), level 4 = max shrink (7.5pt)."""
+    if level < 1 or level > len(SHRINK_LEVELS):
+        return yaml_text
+    cfg = SHRINK_LEVELS[level - 1]
+    data = yaml.safe_load(yaml_text)
+    design = data.get("design", {})
+    typo = design.get("typography", {})
+    fs = typo.get("font_size", {})
+    sects = design.get("sections", {})
+    stit = design.get("section_titles", {})
+
+    fs["body"] = f"{cfg['body_pt']}pt"
+    typo["line_spacing"] = f"{cfg['line_spacing']}em"
+    typo["font_size"] = fs
+    sects["space_between_regular_entries"] = f"{cfg['entry_spacing']}em"
+    stit["space_above"] = f"{cfg['section_above']}cm"
+
+    design["typography"] = typo
+    design["sections"] = sects
+    design["section_titles"] = stit
+    data["design"] = design
+    return yaml.dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False)
+
+
 def job_id(job: dict) -> str:
     company = job.get("company", job.get("companyName", "Company")).strip()
     title   = job.get("title", job.get("position", "Role")).strip()
@@ -141,16 +176,27 @@ def mark_done(jid: str):
 #  STEP 1 — CALL GPT-4o TO TAILOR THE YAML
 # ────────────────────────────────────────────────────────────
 
-def tailor_yaml(job: dict, base_yaml: str, tailoring_prompt: str, trim_note: str = "") -> str:
+def tailor_yaml(job: dict, base_yaml: str, tailoring_prompt: str,
+                projects_pool: str = "", trim_note: str = "") -> str:
     """
-    Send the job description + base YAML + your ATS prompt to GPT-4o.
+    Send the job description + base YAML + project pool + ATS prompt to GPT-4o.
     Returns a tailored YAML string.
     trim_note is appended when we need GPT to shorten for page count.
+    projects_pool is the full All_Projects.md content for project selection.
     """
     company     = job.get("company", job.get("companyName", "Company")).strip()
     title       = job.get("title", job.get("position", "Role")).strip()
     location    = job.get("location", "N/A")
     description = job.get("description", job.get("descriptionText", "")).strip()
+
+    projects_section = ""
+    if projects_pool:
+        projects_section = f"""
+════════════════════════════════
+FULL PROJECT PORTFOLIO (select from these)
+════════════════════════════════
+{projects_pool}
+"""
 
     user_message = f"""
 {tailoring_prompt}
@@ -169,7 +215,7 @@ Job Description:
 BASE RESUME YAML
 ════════════════════════════════
 {base_yaml}
-
+{projects_section}
 ════════════════════════════════
 OUTPUT INSTRUCTIONS
 ════════════════════════════════
@@ -301,48 +347,60 @@ def count_pages(pdf_path: str) -> int:
 # ────────────────────────────────────────────────────────────
 
 def build_trim_note(pages: int, attempt: int) -> str:
-    """Progressive trim guidance based on failed attempt number."""
+    """Progressive trim guidance after font shrinking has already been tried."""
+    min_pt = SHRINK_LEVELS[-1]["body_pt"]
     common = f"""
 IMPORTANT - PAGE COUNT ISSUE:
-The previous version rendered as {pages} pages. The next version must fit exactly 1 page.
-Preserve truthful JD-aligned content and keep outcome/tech keywords.
-Do not change company names, job titles, dates, institutions, or GPA.
-Minimum content floor:
-- UF >= 2 bullets
-- Cognera >= 2 bullets
-- ADP >= 2 bullets
-- ADRIN-ISRO >= 1 bullet
-- INRY >= 1 bullet
-- Keep at least 3 projects with 1 strong bullet each
-- Keep the formatting of the base resume do not change it.
+The previous version rendered as {pages} pages, even after reducing font to {min_pt}pt.
+Font reduction will be applied automatically after you produce the YAML.
+Your goal: trim content so it fits on 1 WELL-FILLED page at 7pt body font size.
+Minor overflow (~10-15%) is OK — font shrinking will handle it automatically.
+- Do NOT over-trim: the page should be 90-95% filled at 7pt, not sparse with empty space.
+- Preserve JD-aligned keywords and measurable outcomes.
+- Do not change company names, dates, institutions, or GPA.
+- Keep ALL 5 experience entries — NEVER remove an experience.
+- Do NOT add an Extracurricular Activities section.
+- Use design: body font 7pt, name 14pt bold, section_titles 1.0em bold, 0.35em line spacing, 0.3em entry spacing, 0.8cm margins.
 """
 
     if attempt == 1:
         return common + """
-Next attempt: LIGHT trim.
-1) Reduce the bullets to 2 each for each experience.
-2) Keep metrics and tools and same number of projects.
-3) Trim project verbosity before experience.
-4) Remove redundancy only.
-5) Keep the formatting of the base resume do not change it.
+MODERATE trim — reduce content slightly, font shrinking handles the rest:
+1) Make each bullet 1-2 concise lines (no 3-line bullets).
+2) Reduce projects from 6 to 5, each with 2 compact bullets.
+3) Shorten Summary to 2 sentences if it's currently 3.
+4) Trim project technology tags to 6-8 most relevant technologies.
+5) Remove filler phrases and replace with JD keyword-rich specifics.
+6) Reduce ADRIN-ISRO to 2 bullets and INRY to 1 bullet.
+Remember: minor overflow is handled by font shrinking — do NOT trim below 90% page fill at 7pt.
+MANDATORY: keep all 5 experiences, minimum 5 projects, no extracurriculars.
 """
     if attempt == 2:
         return common + """
-Next attempt: MEDIUM trim.
-1) Make project bullets one compact line each.
-2) Compress older roles first (INRY, ADRIN-ISRO) while respecting minimums.
-3) Shorten ADP/Cognera wording without dropping core results.
-4) Remove repeated phrasing across bullets.
+FIRMER trim — target well-filled 1 page, NOT a sparse page:
+1) UF and Cognera: 2 bullets each, each 1 line.
+2) ADP: 2 bullets, each 1 line.
+3) ADRIN-ISRO: 2 bullets, 1 line each. INRY: 1 bullet, 1 line.
+4) Projects: 5 projects, each with 1-2 bullets.
+5) Compress project technology tags to 5-6 key technologies.
+6) Shorten Summary to 2 sentences.
+MANDATORY: keep all 5 experiences, minimum 5 projects, no extracurriculars.
+Minimum content floor: Summary >= 1 bullet, UF >= 2, Cognera >= 2, ADP >= 2, ISRO >= 1, INRY >= 1, Projects >= 5.
 """
     return common + """
-Next attempt: AGGRESSIVE trim (still not sparse).
-1) Keep only highest-signal JD-aligned bullets per role while respecting minimums.
-2) Keep exactly 2 projects with one high-impact line each.
-3) Keep outcomes + technologies, remove low-value detail.
+AGGRESSIVE trim — but still aim for a FULL page, not a sparse one:
+1) Summary: 2 sentences.
+2) UF and Cognera: 2 compact bullets (1 line each).
+3) ADP: 2 compact bullets (1 line each).
+4) ADRIN-ISRO: 1 bullet. INRY: 1 bullet.
+5) Projects: exactly 5 projects with 1 short bullet each.
+MANDATORY: keep all 5 experiences, minimum 5 projects, no extracurriculars.
+Every bullet must contain at least 1 JD keyword.
 """
 
 
-def process_job(job: dict, base_yaml: str, tailoring_prompt: str, index: int) -> bool:
+def process_job(job: dict, base_yaml: str, tailoring_prompt: str,
+                projects_pool: str, index: int) -> bool:
     company  = safe_name(job.get("company", job.get("companyName", "Company")))
     title    = safe_name(job.get("title", job.get("position", "Role")))
     jid      = f"{company}_{title}"
@@ -379,7 +437,7 @@ Common causes:
 Output ONLY raw valid YAML — nothing else. Double-check every line before responding.
 """
             try:
-                tailored = tailor_yaml(job, base_yaml, tailoring_prompt, extra_note)
+                tailored = tailor_yaml(job, base_yaml, tailoring_prompt, projects_pool, extra_note)
             except Exception as e:
                 print(f" [ERROR] OpenAI error: {e}")
                 return False
@@ -550,20 +608,63 @@ Output ONLY raw valid YAML — nothing else. Double-check every line before resp
                 shutil.rmtree(temp_render_output_dir, ignore_errors=True)
             return True
 
-        # ── Too many pages — instruct GPT to trim ──────────
+        # ── Too many pages — try font shrinking before content trim ──
+        print(f"   [INFO] {pages} pages at original font — trying font reduction...")
+        font_fitted = False
+        for shrink_level in range(1, MAX_SHRINK_LEVELS + 1):
+            body_pt = SHRINK_LEVELS[shrink_level - 1]["body_pt"]
+            shrunk_yaml = apply_shrink_level(tailored, shrink_level)
+            save_file(temp_yaml_path, shrunk_yaml)
+            print(f"   Rendering at {body_pt}pt (shrink {shrink_level}/{MAX_SHRINK_LEVELS})...", end="", flush=True)
+            ok_s, err_s = render_pdf(temp_yaml_path, working_pdf_out)
+            if not ok_s:
+                print(f" [ERROR] {err_s}")
+                break
+            pages = count_pages(working_pdf_out)
+            print(f" {pages} page(s)")
+            if pages == 1:
+                font_fitted = True
+                break
+
+        if font_fitted:
+            final_pdf_path = pdf_out
+            if os.path.exists(final_pdf_path):
+                try:
+                    os.remove(final_pdf_path)
+                except Exception:
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    final_pdf_path = os.path.join(OUTPUT_DIR, f"{jid}_{ts}.pdf")
+            try:
+                shutil.move(working_pdf_out, final_pdf_path)
+            except Exception as e:
+                print(f" [ERROR] Could not finalize PDF: {e}")
+                if temp_yaml_path and os.path.exists(temp_yaml_path):
+                    os.remove(temp_yaml_path)
+                temp_render_dir = os.path.splitext(temp_yaml_path)[0]
+                temp_render_output_dir = f"{temp_render_dir}__render"
+                if os.path.isdir(temp_render_dir):
+                    shutil.rmtree(temp_render_dir, ignore_errors=True)
+                if os.path.isdir(temp_render_output_dir):
+                    shutil.rmtree(temp_render_output_dir, ignore_errors=True)
+                return False
+            print(f"   [OK] Single page at {body_pt}pt (shrink level {shrink_level}, attempt {attempt})!")
+            print(f"   Saved: {final_pdf_path}")
+            if temp_yaml_path and os.path.exists(temp_yaml_path):
+                os.remove(temp_yaml_path)
+            if os.path.exists(first_attempt_pdf):
+                os.remove(first_attempt_pdf)
+            temp_render_dir = os.path.splitext(temp_yaml_path)[0]
+            temp_render_output_dir = f"{temp_render_dir}__render"
+            if os.path.isdir(temp_render_dir):
+                shutil.rmtree(temp_render_dir, ignore_errors=True)
+            if os.path.isdir(temp_render_output_dir):
+                shutil.rmtree(temp_render_output_dir, ignore_errors=True)
+            return True
+
+        # ── Font at minimum, still too long — fall back to content trim ──
         if attempt < MAX_TRIM_RETRIES:
-            print(f"   [WARN] {pages} pages - asking GPT to trim...")
-            trim_note = f"""
-IMPORTANT — PAGE COUNT ISSUE:
-The previous version rendered as {pages} pages. You MUST make it fit in exactly 1 page.
-Trim aggressively in this order:
-1. Shorten project highlights to 1 line each
-2. Trim oldest roles (ADRIN-ISRO, Integrhythm) to 1 bullet each  
-3. Trim ADP to 1 bullet
-4. Remove the least relevant project entirely
-5. Shorten any remaining bullet to one concise line
-The result MUST fit on a single page — be ruthless with trimming.
-"""
+            min_pt = SHRINK_LEVELS[-1]["body_pt"]
+            print(f"   [WARN] Still {pages} pages at {min_pt}pt — asking GPT to trim content...")
             trim_note = build_trim_note(pages, attempt)
         else:
             final_pdf_path = pdf_out
@@ -578,7 +679,7 @@ The result MUST fit on a single page — be ruthless with trimming.
                     shutil.move(working_pdf_out, final_pdf_path)
                 except Exception:
                     pass
-            print(f"   [WARN] Could not achieve single page after {MAX_TRIM_RETRIES} attempts - saving best version")
+            print(f"   [WARN] Could not achieve single page after {MAX_TRIM_RETRIES} attempts + font shrinking — saving best version")
             if temp_yaml_path and os.path.exists(temp_yaml_path):
                 os.remove(temp_yaml_path)
             if os.path.exists(first_attempt_pdf):
@@ -619,6 +720,7 @@ def main():
     print(f"   Jobs file   : {jobs_file}")
     print(f"   Base YAML   : {BASE_YAML}")
     print(f"   Prompt file : {PROMPT_FILE}")
+    print(f"   Projects    : {PROJECTS_FILE}")
     print(f"   Output dir  : {OUTPUT_DIR}/\n")
 
     for f in [jobs_file, BASE_YAML, PROMPT_FILE]:
@@ -631,6 +733,9 @@ def main():
 
     base_yaml        = load_file(BASE_YAML)
     tailoring_prompt = load_file(PROMPT_FILE)
+    projects_pool    = load_file(PROJECTS_FILE) if os.path.exists(PROJECTS_FILE) else ""
+    if not projects_pool:
+        print("[WARN] All_Projects.md not found — GPT will only use projects from base YAML.")
     done             = load_done()
 
     # ── Apply filters ────────────────────────────────────────
@@ -665,7 +770,7 @@ def main():
             continue
 
         # Process the job
-        ok = process_job(job, base_yaml, tailoring_prompt, f"{i}/{total}")
+        ok = process_job(job, base_yaml, tailoring_prompt, projects_pool, f"{i}/{total}")
 
         if ok:
             mark_done(jid)
@@ -688,6 +793,56 @@ def main():
     print(f"   Time    : {elapsed//60}m {elapsed%60}s")
     print(f"   PDFs    : ./{OUTPUT_DIR}/")
     print(f"{'='*60}")
+
+
+def build_all():
+    """Pipeline-callable entry point (no argparse)."""
+    jobs_file = JOBS_FILE
+    if not os.path.exists(jobs_file):
+        print(f"[build_all] No jobs file found at {jobs_file} — skipping resume build.")
+        return
+
+    for f in [BASE_YAML, PROMPT_FILE]:
+        if not os.path.exists(f):
+            print(f"[ERROR] Missing file: {f}")
+            return
+
+    with open(jobs_file, encoding="utf-8") as f:
+        jobs = json.load(f)
+
+    base_yaml = load_file(BASE_YAML)
+    tailoring_prompt = load_file(PROMPT_FILE)
+    projects_pool = load_file(PROJECTS_FILE) if os.path.exists(PROJECTS_FILE) else ""
+    done = load_done()
+
+    total = len(jobs)
+    success = 0
+    skipped = 0
+    failed = 0
+
+    print(f"[build_all] Jobs to process: {total} | Already done: {len(done)}\n")
+
+    for i, job in enumerate(jobs, 1):
+        jid = job_id(job)
+        if jid in done:
+            skipped += 1
+            continue
+        description = job.get("description", job.get("descriptionText", "")).strip()
+        if not description:
+            mark_done(jid)
+            skipped += 1
+            continue
+        ok = process_job(job, base_yaml, tailoring_prompt, projects_pool, f"{i}/{total}")
+        if ok:
+            mark_done(jid)
+            done.add(jid)
+            success += 1
+        else:
+            failed += 1
+        if i < total:
+            time.sleep(DELAY_BETWEEN)
+
+    print(f"[build_all] Done — success={success} skipped={skipped} failed={failed}")
 
 
 if __name__ == "__main__":

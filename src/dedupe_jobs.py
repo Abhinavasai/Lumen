@@ -30,8 +30,10 @@ def make_normalized_key(job: dict) -> str:
     company = normalize_text(job.get("company", ""))
     title = normalize_text(job.get("title", ""))
     # Strip common seniority/level words so near-duplicates collapse
-    for word in ("new grad", "entry level", "junior", "associate", "ii", "iii", "i"):
-        title = title.replace(word, "").strip()
+    for word in ("new grad", "entry level", "junior", "associate"):
+        title = re.sub(r'\b' + re.escape(word) + r'\b', '', title).strip()
+    # Strip trailing roman numerals (I, II, III, IV) as standalone tokens only
+    title = re.sub(r'\b(iv|iii|ii|i)\s*$', '', title).strip()
     location = normalize_text(job.get("location", ""))
     return f"{company}|{title}|{location}"
 
@@ -42,6 +44,13 @@ def dedupe_jobs():
 
     with open(FILTERED_INPUT, encoding="utf-8") as f:
         jobs = json.load(f)
+
+    # Auto-apply-capable platforms first so they win over passive duplicates.
+    # When the same job exists on e.g. Greenhouse AND LinkedIn, we keep the
+    # Greenhouse version because we can actually auto-submit to it.
+    _AUTO_APPLY_SOURCES = {"greenhouse", "lever", "ashby", "workday",
+                           "smartrecruiters", "workable", "bamboohr"}
+    jobs.sort(key=lambda j: (0 if j.get("source") in _AUTO_APPLY_SOURCES else 1))
 
     seen_urls: set[str] = set()
     seen_keys: set[str] = set()

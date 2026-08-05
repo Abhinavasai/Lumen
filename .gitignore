@@ -3,11 +3,14 @@
 
 # Personal profile & resume data (contains PII)
 profile.txt
-Abhinava_Sai_Tirunagari_CV.yaml
+*_CV.yaml
+base_resume.yaml
 docs/Abhinava_Sai_Profile.docx
 docs/Abhinava_Tirunagari_CV.pdf
 docs/Projects.docx
 docs/Prompt.docx
+docs/All_Projects.md
+generate_*_resume.py
 
 # Config (contains Azure endpoint URL — use config.example.yaml as template)
 config.yaml
@@ -27,6 +30,9 @@ jobs.json
 # Generated resumes and rendercv artifacts
 resumes/
 rendercv_output/
+
+# Launcher marker (created by start_app scripts)
+.deps_installed
 
 # Workspace scratch files
 chat.json

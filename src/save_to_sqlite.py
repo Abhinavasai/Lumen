@@ -13,7 +13,7 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 DB_DIR = os.path.join(BASE_DIR, "db")
 os.makedirs(DB_DIR, exist_ok=True)
 
-DEDUPED_INPUT = os.path.join(OUTPUT_DIR, "filtered_jobs.json")
+DEDUPED_INPUT = os.path.join(OUTPUT_DIR, "deduped_jobs.json")
 DB_PATH = os.path.join(DB_DIR, "jobs.db")
 
 
@@ -33,9 +33,16 @@ def init_db(conn: sqlite3.Connection):
             status          TEXT DEFAULT 'new',
             run_date        TEXT,
             ai_score        REAL,
-            ai_reason       TEXT
+            ai_reason       TEXT,
+            is_top_pick     INTEGER DEFAULT 0,
+            dismissed       INTEGER DEFAULT 0
         )
     """)
+    # Migrate existing databases that lack the new columns
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    for col, default in [("is_top_pick", "0"), ("dismissed", "0")]:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} INTEGER DEFAULT {default}")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS job_runs (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,

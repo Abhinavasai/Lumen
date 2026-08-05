@@ -26,7 +26,8 @@ Automated daily job scraper that fetches entry-level / new-grad CS jobs from Lin
 - **Tailored resume builder** — GPT rewrites your base RenderCV YAML per job; renders a single-page PDF; auto-trims if 2 pages
 - **Synthetic project injection** — adds a JD-targeted portfolio project using only your existing tech stack
 - **SQLite storage** — every run is persisted; supports repeated runs without duplicate insertion
-- **Streamlit UI** — Setup tab for first-time config; sidebar pipeline controls; Top Picks, All Jobs, Applied, Generate Resume tabs
+- **Next.js dashboard** — Dark-themed glassmorphism UI with FastAPI backend; Dashboard, All Jobs, Applied, Generate Resume, Settings pages
+- **Streamlit UI (legacy)** — Setup tab for first-time config; sidebar pipeline controls; Top Picks, All Jobs, Applied, Generate Resume tabs
 - **Daily cron** — Windows Task Scheduler runs the pipeline at 8 AM automatically; manual run anytime
 
 ---
@@ -43,6 +44,15 @@ CronJobs/
 │   ├── ai_ranker.py          ← Step 5: Azure OpenAI scores → output/top25_jobs.json
 │   ├── run_pipeline.py       ← Orchestrator (runs all 5 steps)
 │   └── build_all_resumes.py  ← Tailors and renders a PDF resume for each filtered job
+├── api/                      ← FastAPI backend (serves Next.js frontend)
+│   ├── __init__.py
+│   └── server.py             ← 16 REST endpoints wrapping SQLite, config, pipeline
+├── frontend/                 ← Next.js 15 dashboard (App Router + Tailwind)
+│   ├── app/                  ← Pages: Dashboard, Jobs, Applied, Generate, Settings
+│   ├── components/           ← UI primitives + domain components (glassmorphism cards)
+│   ├── lib/                  ← API client, utilities
+│   ├── types/                ← TypeScript interfaces
+│   └── package.json
 ├── output/                   ← Intermediate JSON files (auto-created)
 │   ├── raw_jobs.json
 │   ├── filtered_jobs.json
@@ -55,7 +65,8 @@ CronJobs/
 │   └── PROJECT_DOCUMENTATION.md
 ├── resumes/                  ← AI-tailored PDF resumes (one per job, auto-created)
 ├── YOUR_NAME_CV.yaml         ← Base RenderCV resume (source of truth; gitignored)
-├── app.py                    ← Streamlit UI
+├── app.py                    ← Streamlit UI (legacy)
+├── start_app.bat             ← One-click launcher for Next.js + FastAPI
 ├── config.yaml               ← Keywords, filters, AI settings
 ├── profile.txt               ← Candidate profile for AI scoring
 ├── .env                      ← API keys (never commit)
@@ -70,10 +81,12 @@ CronJobs/
 ## Prerequisites
 
 - Python 3.9 or higher (tested on 3.12)
+- Node.js 18+ and npm (for the Next.js dashboard)
 - An **Azure OpenAI** deployment (GPT-4o or later) — OR an OpenAI API key
 - An **Apify** account and token — [apify.com](https://apify.com) (used for LinkedIn job scraping; free tier available)
 - **Adzuna** API credentials (free tier available at [developer.adzuna.com](https://developer.adzuna.com))
 - `rendercv` for PDF resume generation (`pip install "rendercv[full]"`)
+- `fastapi` and `uvicorn` for the backend (`pip install fastapi uvicorn`)
 
 ---
 
@@ -90,6 +103,12 @@ python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 pip install "rendercv[full]"
+pip install fastapi uvicorn
+
+# Install frontend dependencies
+cd frontend
+npm install
+cd ..
 ```
 
 ### 2. Create your config file
@@ -172,23 +191,57 @@ Languages: Python, TypeScript, Java
 ### 5. Add your base resume YAML
 
 Create or convert your resume to [RenderCV YAML format](https://rendercv.com/user-guide/).
-Save it as `Abhinava_Sai_Tirunagari_CV.yaml` in the project root — **or upload it in the Setup tab**.
+Save it as `base_resume.yaml` in the project root (or set `BASE_YAML_NAME` in `.env`) — **or upload it in the Setup tab**.
 
 > To generate a RenderCV YAML from scratch: `python -m rendercv new "Your Name"` — this creates a template you can fill in.
 
 ### 6. Run the app
 
 ```powershell
+# Option 1 — One-click (Windows)
+start_app.bat
+
+# Option 2 — Manual (two terminals)
+python api/server.py              # Terminal 1: backend on :8000
+cd frontend && npx next dev       # Terminal 2: frontend on :3000
+
+# Option 3 — Legacy Streamlit
 python -m streamlit run app.py
 ```
 
-Click **▶ Run Pipeline Now** in the sidebar to fetch and rank jobs.
+Open `http://localhost:3000` and click **Run Pipeline** to fetch and rank jobs.
 
 ---
 
 ## Running
 
-### Option A — Streamlit UI (recommended)
+### Option A — Next.js Dashboard (recommended)
+
+**One-click:** double-click `start_app.bat` — it launches both servers and opens the browser.
+
+**Manual start (two terminals):**
+
+```powershell
+# Terminal 1 — FastAPI backend
+python api/server.py
+```
+
+```powershell
+# Terminal 2 — Next.js frontend
+cd frontend
+npm install      # first time only
+npx next dev
+```
+
+Opens at `http://localhost:3000`. Backend runs on `http://localhost:8000` (proxied automatically).
+
+- **Dashboard** — AI-ranked top picks, stats, Run Pipeline / Refresh / Build All Resumes buttons
+- **All Jobs** — search and browse every job from the latest run
+- **Applied** — table of applied jobs
+- **Generate Resume** — paste a JD, extract fields, generate a tailored PDF
+- **Settings** — pipeline config, profile, resume YAML, API keys, Greenhouse companies, setup status
+
+### Option B — Streamlit UI (legacy)
 
 ```powershell
 python -m streamlit run app.py
@@ -200,13 +253,13 @@ Opens at `http://localhost:8501`.
 - **AI Top Picks** — ranked results with one-click apply + resume build
 - **Generate Resume** — paste any job description to build a tailored PDF on demand
 
-### Option B — Command line
+### Option C — Command line
 
 ```powershell
 python src/run_pipeline.py
 ```
 
-### Option C — Individual steps
+### Option D — Individual steps
 
 ```powershell
 python src/fetch_jobs.py        # → output/raw_jobs.json
@@ -216,7 +269,7 @@ python src/save_to_sqlite.py    # → db/jobs.db
 python src/ai_ranker.py         # → output/top25_jobs.json + scores in db/jobs.db
 ```
 
-### Option D — Resume Builder (build tailored PDFs for each job)
+### Option E — Resume Builder (build tailored PDFs for each job)
 
 ```powershell
 # Process all jobs in top25_jobs.json
@@ -279,7 +332,8 @@ Sources
          ↓
   ai_ranker.py  (Azure OpenAI scores each job 1–10 → top N)
          ↓
-  Streamlit UI  (AI Top Picks · All Jobs · Applied · Generate Resume · Setup)
+  Next.js Dashboard  (Dashboard · All Jobs · Applied · Generate Resume · Settings)
+  └─ or Streamlit UI (legacy)  (AI Top Picks · All Jobs · Applied · Generate Resume · Setup)
 ```
 
 ---

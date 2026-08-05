@@ -20,15 +20,31 @@ FILTERED_OUTPUT = os.path.join(OUTPUT_DIR, "filtered_jobs.json")
 
 # Titles that match target roles
 TITLE_KEYWORDS = [
+    # Core SWE
     "software engineer", "software developer", "swe",
+    # AI / ML
     "ai engineer", "ml engineer", "machine learning engineer",
     "artificial intelligence engineer",
+    "deep learning", "computer vision",
+    "ai researcher", "ml researcher",
+    # Backend / Full-stack
     "backend engineer", "backend developer",
     "full stack", "fullstack", "full-stack",
+    # Platform / Data
     "ai platform", "platform engineer",
-    "data engineer", "data scientist",
+    "data engineer", "data scientist", "data analyst",
+    # LLM / GenAI
     "llm engineer", "generative ai", "gen ai",
+    # Language / framework-specific
+    "java engineer", "java developer",
+    "python engineer", "python developer",
+    "react developer",
+    "android developer",
+    # Other target roles
     "application developer", "systems engineer",
+    "ui/ux developer", "ui developer", "ux developer",
+    "database administrator",
+    # Entry-level signals
     "new grad", "early career", "entry level", "entry-level",
 ]
 
@@ -42,12 +58,14 @@ TITLE_SENIORITY_EXCLUDE = [
 
 # Checked against title + FULL description — explicit experience requirements
 DESCRIPTION_EXPERIENCE_EXCLUDE = [
+    # 3+ years and above (roles requiring up to 2 years are allowed)
     "5+ years", "6+ years", "7+ years", "8+ years", "10+ years",
     "3+ years", "4+ years", "five years", "seven years",
     "minimum 3 years", "minimum 4 years", "minimum 5 years",
     "at least 3 years", "at least 4 years", "at least 5 years",
     "3 years of experience", "4 years of experience", "5 years of experience",
-    "3 years experience", "4 years experience", "5 years experience", "3+ years experience", "4+ years experience", "5+ years experience",
+    "3 years experience", "4 years experience", "5 years experience",
+    "3+ years experience", "4+ years experience", "5+ years experience",
 ]
 
 # ── H1B / Visa sponsorship ─────────────────────────────────────────────────
@@ -84,6 +102,10 @@ _H1B_POSITIVE_SIGNALS = [
     "will sponsor", "does sponsor", "we sponsor",
     "sponsorship for this role", "immigration assistance",
     "opt/cpt", "opt cpt", "f1 visa", "work authorization provided",
+    # OPT / contract-friendly signals
+    "opt eligible", "opt friendly", "opt accepted",
+    "contract to hire", "c2h", "corp to corp", "c2c",
+    "w2 contract",
 ]
 
 
@@ -151,14 +173,6 @@ _US_STATE_ABBR = re.compile(
     r")(\s|$)"
 )
 
-_US_KEYWORDS = [
-    "united states", "remote", " us ", "u.s.", "usa",
-    "new york", "san francisco", "seattle", "chicago",
-    "austin", "boston", "los angeles", "denver", "atlanta",
-    "miami", "washington", "anywhere", "nationwide",
-    "county",        # Adzuna: "Cook County", "Orange County" etc
-    "metropolitan",  # "Kansas City Metropolitan Area"
-]
 
 
 def load_config():
@@ -266,6 +280,7 @@ def filter_jobs():
     config = load_config()
     hours = config["filters"].get("posted_within_hours", 24)
     configured_location = config["filters"].get("location", "United States")
+    blocked_companies = [c.lower() for c in config.get("blocked_companies", [])]
 
     with open(RAW_INPUT, encoding="utf-8") as f:
         jobs = json.load(f)
@@ -275,16 +290,21 @@ def filter_jobs():
         print(f"[filter] Excluding {len(applied_urls)} already-applied job(s).")
 
     filtered = []
-    reasons = {"applied": 0, "title": 0, "seniority": 0, "location": 0, "sponsorship": 0, "passed": 0}
+    reasons = {"applied": 0, "title": 0, "seniority": 0, "location": 0, "sponsorship": 0, "blocked": 0, "passed": 0}
 
     for job in jobs:
         title = job.get("title", "")
         description = job.get("description", "")
         location = job.get("location", "")
         posted_at = job.get("posted_at", "")
+        company_lower = job.get("company", "").lower()
 
         if job.get("url") in applied_urls:
             reasons["applied"] += 1
+            continue
+
+        if blocked_companies and any(b in company_lower for b in blocked_companies):
+            reasons["blocked"] += 1
             continue
 
         if not is_relevant_title(title):
@@ -323,7 +343,7 @@ def filter_jobs():
         f"[filter] {len(jobs)} raw -> {len(filtered)} passed "
         f"(dropped: applied={reasons['applied']}, title={reasons['title']}, "
         f"seniority={reasons['seniority']}, location={reasons['location']}, "
-        f"sponsorship={reasons['sponsorship']}) "
+        f"sponsorship={reasons['sponsorship']}, blocked={reasons['blocked']}) "
         f"| h1b_friendly={h1b_count}/{len(filtered)} -> saved to {FILTERED_OUTPUT}"
     )
     return filtered
