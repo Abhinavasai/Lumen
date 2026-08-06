@@ -1055,7 +1055,7 @@ with tab_custom:
 # ── Tab 5 : Setup ────────────────────────────────────────────────────────────
 with tab_setup:
     PROFILE_PATH   = os.path.join(BASE_DIR, "profile.txt")
-    BASE_YAML_PATH = os.path.join(BASE_DIR, os.getenv("BASE_YAML_NAME", "base_resume.yaml"))
+    BASE_YAML_PATH = os.path.join(BASE_DIR, os.getenv("BASE_YAML_NAME", "Abhinava_Sai_Tirunagari_CV.yaml"))
     ENV_PATH       = os.path.join(BASE_DIR, ".env")
 
     def read_env() -> dict:

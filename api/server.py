@@ -28,7 +28,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "db" / "jobs.db"
 CONFIG_PATH = BASE_DIR / "config.yaml"
 PROFILE_PATH = BASE_DIR / "profile.txt"
-YAML_PATH = BASE_DIR / os.getenv("BASE_YAML_NAME", "base_resume.yaml")
+YAML_PATH = BASE_DIR / os.getenv("BASE_YAML_NAME", "Abhinava_Sai_Tirunagari_CV.yaml")
 ENV_PATH = BASE_DIR / ".env"
 OUTPUT_DIR = BASE_DIR / "output"
 

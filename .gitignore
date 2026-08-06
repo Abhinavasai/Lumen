@@ -15,6 +15,9 @@ generate_*_resume.py
 # Config (contains Azure endpoint URL — use config.example.yaml as template)
 config.yaml
 
+# Node
+node_modules/
+
 # Python
 __pycache__/
 *.pyc

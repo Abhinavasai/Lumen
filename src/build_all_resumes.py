@@ -31,7 +31,7 @@ from openai import OpenAI, AzureOpenAI
 # ══════════════════════════════════════════════════════════════
 BASE_DIR         = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 JOBS_FILE        = os.path.join(BASE_DIR, "output", "top25_jobs.json")
-BASE_YAML        = os.path.join(BASE_DIR, os.getenv("BASE_YAML_NAME", "base_resume.yaml"))
+BASE_YAML        = os.path.join(BASE_DIR, os.getenv("BASE_YAML_NAME", "Abhinava_Sai_Tirunagari_CV.yaml"))
 PROMPT_FILE      = os.path.join(BASE_DIR, "docs", "ATS_Resume_Tailoring_Prompt.txt")
 PROJECTS_FILE    = os.path.join(BASE_DIR, "docs", "All_Projects.md")
 OUTPUT_DIR       = os.path.join(BASE_DIR, "resumes")
